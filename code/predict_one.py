@@ -67,5 +67,5 @@ class PredictForROS():
 
 		output = self.zsg_net(inp)
 
-		output = self.eval_fn.get_best_box(output,self.img_size )
+		output = self.eval_fn.get_best_box(output,self.img_size)
 		print(output)
