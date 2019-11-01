@@ -105,6 +105,14 @@ class Evaluator(nn.Module):
         return out_dict
         # return reduce_dict(out_dict)
 
+
+    def get_best_box_to_use(self,actual_bbox,ids_to_use):
+        best_boxes = torch.gather(
+            actual_bbox, 1, ids_to_use.view(-1, 1, 1).expand(-1, 1, 4))
+        best_boxes = best_boxes.view(best_boxes.size(0), -1)
+
+        return best_boxes
+
     def get_eval_result(self, actual_bbox, annot, ids_to_use, msk=None):
         best_boxes = torch.gather(
             actual_bbox, 1, ids_to_use.view(-1, 1, 1).expand(-1, 1, 4))
@@ -115,6 +123,52 @@ class Evaluator(nn.Module):
         ious = torch.diag(IoU_values(best_boxes, annot))
         # self.fin_results = ious
         return (ious >= self.acc_iou_threshold).float().mean(), best_boxes
+
+
+    def get_best_box(self,out,img_size):
+        att_box = out['att_out']
+        reg_box = out['bbx_out']
+        feat_sizes = out['feat_sizes']
+        num_f_out = out['num_f_out']
+
+        device = att_box.device
+
+        if len(num_f_out) > 1:
+            num_f_out = int(num_f_out[0].item())
+        else:
+            num_f_out = int(num_f_out.item())
+
+        feat_sizes = feat_sizes[:num_f_out, :]
+
+        if self.anchs is None:
+            feat_sizes = feat_sizes[:num_f_out, :]
+            anchs = self.get_anchors(feat_sizes)
+            anchs = anchs.to(device)
+            self.anchs = anchs
+        else:
+            anchs = self.anchs
+
+        att_box_sigmoid = torch.sigmoid(att_box).squeeze(-1)
+        att_box_best, att_box_best_ids = att_box_sigmoid.max(1)
+
+
+
+        ####
+
+        actual_bbox = reg_params_to_bbox(
+            anchs, reg_box)
+
+        pred_boxes = self.get_best_box_to_use(actual_bbox,att_box_best_ids)
+
+        reshaped_boxes = x1y1x2y2_to_y1x1y2x2(reshape(
+            (pred_boxes + 1) / 2, img_size))
+
+        out_dict ={}
+        out_dict['pred_boxes'] = reshaped_boxes
+        out_dict['pred_scores'] = att_box_best
+
+        return out_dict
+
 
 
 def get_default_eval(ratios, scales, cfg):

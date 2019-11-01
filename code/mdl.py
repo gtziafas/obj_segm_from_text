@@ -354,6 +354,7 @@ class ZSGNet(nn.Module):
         inp0 = inp['img']
         inp1 = inp['qvec']
         qlens = inp['qlens']
+
         max_qlen = int(qlens.max().item())
         req_embs = inp1[:, :max_qlen, :].contiguous()
 
