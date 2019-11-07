@@ -6,13 +6,13 @@ https://www.youtube.com/watch?v=kgQgaghf71o
 
 # usage
 - Be sure to edit paths inside files to your own static images, rosbags etc.
-- the model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network
+- The model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network
 - Open 5 terminals:
-  roscore
-  rosrun oject_segmentation_from_text image_buffer_from_path.py (for static image), or rosbag play for recorded data)
-  rosrun object_segmentation_from_text modeL_inference_pipeline.py
-  rosrun object_segmentation_from_text caption_buffer_from_console.py
-  rosrun rviz rviz 
+  $roscore
+  $rosrun oject_segmentation_from_text image_buffer_from_path.py (for static image), or rosbag play for recorded data)
+  $rosrun object_segmentation_from_text modeL_inference_pipeline.py
+  $rosrun object_segmentation_from_text caption_buffer_from_console.py
+  $rosrun rviz rviz 
 
 
 # todo
