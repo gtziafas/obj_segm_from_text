@@ -1,5 +1,5 @@
-# obj_segm_from_text
-Code for the final project of the course "Cognitive Robotics", based on: https://github.com/TheShadow29/zsgnet-pytorch
+# object_segmentation_from_text
+Code for the final project of the RUG's course "Cognitive Robotics" (November 2019), based on: https://github.com/TheShadow29/zsgnet-pytorch
 
 # demo
 https://www.youtube.com/watch?v=kgQgaghf71o
