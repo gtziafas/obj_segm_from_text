@@ -2,7 +2,7 @@
 Code for the final project of the course "Cognitive Robotics", based on: https://github.com/TheShadow29/zsgnet-pytorch
 
 # demo
-
+https://www.youtube.com/watch?v=kgQgaghf71o
 
 # usage
 - Be sure to edit paths inside files to your own static images, rosbags etc.
