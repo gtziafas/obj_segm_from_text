@@ -1,14 +1,21 @@
 """
 Model script for ZSG Network, adapted from: https://github.com/TheShadow29/zsgnet-pytorch
 Author: Arka Sadhu
+
+SSD-VGG implementation adapted from the repository: https://github.com/amdegroot/ssd.pytorch/blob/master/ssd.py
+
+FPN-ResNet taken from the repository: https://github.com/yhenon/pytorch-retinanet/blob/master/model.py
 """
+import os
+import numpy as np
 import torch
 import torch.nn as nn 
+import torch.nn.functional as F
+import torch.utils.model_zoo as model_zoo
+from torch.autograd import Variable
 import torchvision.models as tvm
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from fpn_resnet import FPN_backbone
 from anchors import create_grid
-import ssd_vgg
 from typing import Dict, Any
 
 device='cpu'
@@ -421,3 +428,508 @@ def get_default_net(num_anchors=1, cfg=None):
     zsg_net = ZSGNet(backbone, num_anchors, cfg=cfg)
     return zsg_net
 
+
+class SSD(nn.Module):
+    """Single Shot Multibox Architecture
+    The network is composed of a base VGG network followed by the
+    added multibox conv layers.  Each multibox layer branches into
+        1) conv2d for class conf scores
+        2) conv2d for localization predictions
+        3) associated priorbox layer to produce default bounding
+           boxes specific to the layer's feature map size.
+    See: https://arxiv.org/pdf/1512.02325.pdf for more details.
+
+    Args:
+        phase: (string) Can be "test" or "train"
+        size: input image size
+        base: VGG16 layers for input, size of either 300 or 500
+        extras: extra layers that feed to multibox loc and conf layers
+        head: "multibox head" consists of loc and conf conv layers
+    """
+
+    def __init__(self, phase, size, base, extras, head, num_classes, cfg=None):
+        super(SSD, self).__init__()
+        self.phase = phase
+        self.num_classes = num_classes
+        # self.cfg = (coco, voc)[num_classes == 21]
+        # self.priorbox = PriorBox(self.cfg)
+        # self.priors = Variable(self.priorbox.forward(), volatile=True)
+        self.size = size
+        self.cfg = cfg
+
+        # SSD network
+        self.vgg = nn.ModuleList(base)
+        # self.vgg = tvm.vgg16(pretrained=True)
+        # Layer learns to scale the l2 normalized features from conv4_3
+        # self.L2Norm = L2Norm(512, 20)
+        self.fproj1 = nn.Conv2d(512, 256, kernel_size=1)
+        self.fproj2 = nn.Conv2d(1024, 256, kernel_size=1)
+        self.fproj3 = nn.Conv2d(512, 256, kernel_size=1)
+        self.extras = nn.ModuleList(extras)
+
+        self.loc = nn.ModuleList(head[0])
+        self.conf = nn.ModuleList(head[1])
+
+    def forward(self, x):
+        """Applies network layers and ops on input image(s) x.
+
+        Args:
+            x: input image or batch of images. Shape: [batch,3,300,300].
+
+        Return:
+            Depending on phase:
+            test:
+                Variable(tensor) of output class label predictions,
+                confidence score, and corresponding location predictions for
+                each object detected. Shape: [batch,topk,7]
+
+            train:
+                list of concat outputs from:
+                    1: confidence layers, Shape: [batch*num_priors,num_classes]
+                    2: localization layers, Shape: [batch,num_priors*4]
+                    3: priorbox layers, Shape: [2,num_priors*4]
+        """
+        sources = list()
+
+        # apply vgg up to conv4_3 relu
+        for k in range(23):
+            x = self.vgg[k](x)
+
+        # s = self.L2Norm(x)
+        s = x / x.norm(dim=1, keepdim=True)
+        sources.append(s)
+        # print(f'Adding1 of dim {s.shape}')
+
+        # apply vgg up to fc7
+        for k in range(23, len(self.vgg)):
+            x = self.vgg[k](x)
+        sources.append(x)
+        # print(f'Adding2 of dim {x.shape}')
+
+        # apply extra layers and cache source layer outputs
+        for k, v in enumerate(self.extras):
+            x = F.relu(v(x), inplace=True)
+            if k % 2 == 1:
+                sources.append(x)
+                # print(f'Adding3 of dim {x.shape}')
+
+        out_sources = [self.fproj1(sources[0]), self.fproj2(
+            sources[1]), self.fproj3(sources[2])] + sources[3:]
+        if self.cfg['resize_img'][0] >= 600:
+            # To Reduce the computation
+            return out_sources[1:]
+        return out_sources
+
+    def load_weights(self, base_file):
+        other, ext = os.path.splitext(base_file)
+        if ext == '.pkl' or '.pth':
+            print('Loading weights into state dict...')
+            self.load_state_dict(torch.load(base_file,
+                                            map_location=lambda storage, loc: storage))
+            print('Finished!')
+        else:
+            print('Sorry only .pth and .pkl files supported.')
+
+
+# This function is derived from torchvision VGG make_layers()
+# https://github.com/pytorch/vision/blob/master/torchvision/models/vgg.py
+def vgg(cfg, i, batch_norm=False):
+    layers = []
+    in_channels = i
+    for v in cfg:
+        if v == 'M':
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        elif v == 'C':
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)]
+        else:
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [conv2d, nn.ReLU(inplace=True)]
+            in_channels = v
+    pool5 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+    conv6 = nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6)
+    conv7 = nn.Conv2d(1024, 1024, kernel_size=1)
+    layers += [pool5, conv6,
+               nn.ReLU(inplace=True), conv7, nn.ReLU(inplace=True)]
+    return layers
+
+
+def add_extras(cfg, i, batch_norm=False):
+    # Extra layers added to VGG for feature scaling
+    layers = []
+    in_channels = i
+    flag = False
+    for k, v in enumerate(cfg):
+        if in_channels != 'S':
+            if v == 'S':
+                layers += [nn.Conv2d(in_channels, cfg[k + 1],
+                                     kernel_size=(1, 3)[flag], stride=2, padding=1)]
+            else:
+                layers += [nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])]
+            flag = not flag
+        in_channels = v
+    return layers
+
+
+def multibox(vgg, extra_layers, cfg, num_classes):
+    loc_layers = []
+    conf_layers = []
+    vgg_source = [21, -2]
+    for k, v in enumerate(vgg_source):
+        loc_layers += [nn.Conv2d(vgg[v].out_channels,
+                                 cfg[k] * 4, kernel_size=3, padding=1)]
+        conf_layers += [nn.Conv2d(vgg[v].out_channels,
+                                  cfg[k] * num_classes, kernel_size=3, padding=1)]
+    for k, v in enumerate(extra_layers[1::2], 2):
+        loc_layers += [nn.Conv2d(v.out_channels, cfg[k]
+                                 * 4, kernel_size=3, padding=1)]
+        conf_layers += [nn.Conv2d(v.out_channels, cfg[k]
+                                  * num_classes, kernel_size=3, padding=1)]
+    return vgg, extra_layers, (loc_layers, conf_layers)
+
+
+base = {
+    '300': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'C', 512, 512, 512, 'M',
+            512, 512, 512],
+    '512': [],
+}
+extras = {
+    '300': [256, 'S', 512, 128, 'S', 256, 128, 256, 128, 256],
+    '512': [],
+}
+mbox = {
+    '300': [4, 6, 6, 6, 4, 4],  # number of boxes per feature map location
+    '512': [],
+}
+
+
+def build_ssd(phase, size=300, num_classes=21, cfg=None):
+    if phase != "test" and phase != "train":
+        print("ERROR: Phase: " + phase + " not recognized")
+        return
+    if size != 300:
+        print("ERROR: You specified size " + repr(size) + ". However, " +
+              "currently only SSD300 (size=300) is supported!")
+        return
+    base_, extras_, head_ = multibox(vgg(base[str(size)], 3),
+                                     add_extras(extras[str(size)], 1024),
+                                     mbox[str(size)], num_classes)
+    return SSD(phase, size, base_, extras_, head_, num_classes, cfg=cfg)
+
+model_urls = {
+    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
+}
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution with padding"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+
+
+class BasicBlock(nn.Module):
+    """
+    standard Basic block
+    """
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(BasicBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class Bottleneck(nn.Module):
+    """
+    Standard Bottleneck block
+    """
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(Bottleneck, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
+                               padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * 4)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+def pad_out(k):
+    "padding to have same size"
+    return (k-1)//2
+
+
+class FPN_backbone(nn.Module):
+    """
+    A different fpn, doubt it will work
+    """
+
+    def __init__(self, inch_list, cfg, feat_size=256):
+        super().__init__()
+
+#         self.backbone = backbone
+
+        # expects c3, c4, c5 channel dims
+        self.inch_list = inch_list
+        self.cfg = cfg
+        c3_ch, c4_ch, c5_ch = self.inch_list
+        self.feat_size = feat_size
+
+        self.P7_2 = nn.Conv2d(in_channels=self.feat_size,
+                              out_channels=self.feat_size, stride=2,
+                              kernel_size=3,
+                              padding=1)
+        self.P6 = nn.Conv2d(in_channels=c5_ch,
+                            out_channels=self.feat_size,
+                            kernel_size=3, stride=2, padding=pad_out(3))
+        self.P5_1 = nn.Conv2d(in_channels=c5_ch,
+                              out_channels=self.feat_size,
+                              kernel_size=1, padding=pad_out(1))
+
+        self.P5_2 = nn.Conv2d(in_channels=self.feat_size, out_channels=self.feat_size,
+                              kernel_size=3, padding=pad_out(3))
+
+        self.P4_1 = nn.Conv2d(in_channels=c4_ch,
+                              out_channels=self.feat_size, kernel_size=1,
+                              padding=pad_out(1))
+
+        self.P4_2 = nn.Conv2d(in_channels=self.feat_size,
+                              out_channels=self.feat_size, kernel_size=3,
+                              padding=pad_out(3))
+
+        self.P3_1 = nn.Conv2d(in_channels=c3_ch,
+                              out_channels=self.feat_size, kernel_size=1,
+                              padding=pad_out(1))
+
+        self.P3_2 = nn.Conv2d(in_channels=self.feat_size,
+                              out_channels=self.feat_size, kernel_size=3,
+                              padding=pad_out(3))
+
+    def forward(self, inp):
+        # expects inp to be output of c3, c4, c5
+        c3, c4, c5 = inp
+        p51 = self.P5_1(c5)
+        p5_out = self.P5_2(p51)
+
+        # p5_up = F.interpolate(p51, scale_factor=2)
+        p5_up = F.interpolate(p51, size=(c4.size(2), c4.size(3)))
+        p41 = self.P4_1(c4) + p5_up
+        p4_out = self.P4_2(p41)
+
+        # p4_up = F.interpolate(p41, scale_factor=2)
+        p4_up = F.interpolate(p41, size=(c3.size(2), c3.size(3)))
+        p31 = self.P3_1(c3) + p4_up
+        p3_out = self.P3_2(p31)
+
+        p6_out = self.P6(c5)
+
+        p7_out = self.P7_2(F.relu(p6_out))
+        if self.cfg['resize_img'] == [600, 600]:
+            return [p4_out, p5_out, p6_out, p7_out]
+
+        # p8_out = self.p8_gen(F.relu(p7_out))
+        p8_out = F.adaptive_avg_pool2d(p7_out, 1)
+        return [p3_out, p4_out, p5_out, p6_out, p7_out, p8_out]
+
+
+class PyramidFeatures(nn.Module):
+    """
+    Pyramid Features, especially for Resnet
+    """
+
+    def __init__(self, C3_size, C4_size, C5_size, feature_size=256):
+        super(PyramidFeatures, self).__init__()
+
+        # upsample C5 to get P5 from the FPN paper
+        self.P5_1 = nn.Conv2d(C5_size, feature_size,
+                              kernel_size=1, stride=1, padding=0)
+        self.P5_upsampled = nn.Upsample(scale_factor=2, mode='nearest')
+        self.P5_2 = nn.Conv2d(feature_size, feature_size,
+                              kernel_size=3, stride=1, padding=1)
+        # add P5 elementwise to C4
+        self.P4_1 = nn.Conv2d(C4_size, feature_size,
+                              kernel_size=1, stride=1, padding=0)
+        self.P4_upsampled = nn.Upsample(scale_factor=2, mode='nearest')
+        self.P4_2 = nn.Conv2d(feature_size, feature_size,
+                              kernel_size=3, stride=1, padding=1)
+        # add P4 elementwise to C3
+        self.P3_1 = nn.Conv2d(C3_size, feature_size,
+                              kernel_size=1, stride=1, padding=0)
+        self.P3_2 = nn.Conv2d(feature_size, feature_size,
+                              kernel_size=3, stride=1, padding=1)
+        # "P6 is obtained via a 3x3 stride-2 conv on C5"
+        self.P6 = nn.Conv2d(C5_size, feature_size,
+                            kernel_size=3, stride=2, padding=1)
+        # "P7 is computed by applying ReLU followed by a 3x3 stride-2 conv on P6"
+        self.P7_1 = nn.ReLU()
+        self.P7_2 = nn.Conv2d(feature_size, feature_size,
+                              kernel_size=3, stride=2, padding=1)
+
+    def forward(self, inputs):
+        """
+        Inputs should be from layer2,3,4
+        """
+        C3, C4, C5 = inputs
+        P5_x = self.P5_1(C5)
+        P5_upsampled_x = self.P5_upsampled(P5_x)
+        P5_x = self.P5_2(P5_x)
+
+        P4_x = self.P4_1(C4)
+        P4_x = P5_upsampled_x + P4_x
+        P4_upsampled_x = self.P4_upsampled(P4_x)
+        P4_x = self.P4_2(P4_x)
+        P3_x = self.P3_1(C3)
+        P3_x = P3_x + P4_upsampled_x
+        P3_x = self.P3_2(P3_x)
+        P6_x = self.P6(C5)
+        P7_x = self.P7_1(P6_x)
+        P7_x = self.P7_2(P7_x)
+        return [P3_x, P4_x, P5_x, P6_x, P7_x]
+
+
+class ResNet(nn.Module):
+    """
+    Basic Resnet Module
+    """
+
+    def __init__(self, num_classes, block, layers):
+        self.inplanes = 64
+        super(ResNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7,
+                               stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+
+        if block == BasicBlock:
+            fpn_sizes = [self.layer2[layers[1]-1].conv2.out_channels, self.layer3[layers[2] -
+                                                                                  1].conv2.out_channels, self.layer4[layers[3]-1].conv2.out_channels]
+        elif block == Bottleneck:
+            fpn_sizes = [self.layer2[layers[1]-1].conv3.out_channels, self.layer3[layers[2] -
+                                                                                  1].conv3.out_channels, self.layer4[layers[3]-1].conv3.out_channels]
+
+        self.freeze_bn()
+        self.fpn = PyramidFeatures(fpn_sizes[0], fpn_sizes[1], fpn_sizes[2])
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, np.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+        prior = 0.01
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        """
+        Convenience function to generate layers given blocks and
+        channel dimensions
+        """
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+        return nn.Sequential(*layers)
+
+    def freeze_bn(self):
+        '''Freeze BatchNorm layers.'''
+        for layer in self.modules():
+            if isinstance(layer, nn.BatchNorm2d):
+                layer.eval()
+
+    def forward(self, inputs):
+        """
+        inputs should be images
+        """
+        img_batch = inputs
+
+        x = self.conv1(img_batch)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x1 = self.layer1(x)
+        x2 = self.layer2(x1)
+        x3 = self.layer3(x2)
+        x4 = self.layer4(x3)
+        features = self.fpn([x2, x3, x4])
+        return features
+
+
+def resnet50(num_classes, pretrained=False, **kwargs):
+    """Constructs a ResNet-50 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(num_classes, Bottleneck, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(
+            model_urls['resnet50'], model_dir='.'), strict=False)
+    return model
