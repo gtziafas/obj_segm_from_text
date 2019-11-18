@@ -43,13 +43,14 @@ class _3DImageBuffer():
 	def repub(self):
 		self.depth.header = self.rgb.header
 		self.info.header = self.rgb.header
-		while not rospy.is_shutdown():
-			log_str = 'buffering masked images%s' % rospy.get_time()
-			rospy.loginfo(log_str)
-			self.rgb_pub.publish(self.rgb)
-			self.depth_pub.publish(self.depth)
-			self.camera_pub.publish(self.info)
-			self.rate.sleep()
+	
+		# re-publish data
+		log_str = 'buffering masked images%s' % rospy.get_time()
+		rospy.loginfo(log_str)
+		self.rgb_pub.publish(self.rgb)
+		self.depth_pub.publish(self.depth)
+		self.camera_pub.publish(self.info)
+		self.rate.sleep()
 
 def main(args):
   buf = _3DImageBuffer()
