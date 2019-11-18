@@ -1,0 +1,21 @@
+<launch>
+
+<!-- Nodelet manager for this pipeline -->
+<node pkg="nodelet" type="nodelet" args="manager"
+    name="record_player_manager" output="screen"/>
+
+<!--convert registered depth frame from mm to m -->
+<node pkg='nodelet' type='nodelet' name='metric_rect'
+	args="load depth_image_proc/convert_metric record_player_manager --no-bond">
+ <remap from='image' to='/camera/depth_registered/hw_registered/image_rect'/>
+</node>
+
+<!--extract pointcloud -->
+<node pkg='nodelet' type='nodelet' name='cloudify'
+	args="load depth_image_proc/point_cloud_xyzrgb record_player_manager --no-bond">
+ <remap from="depth_registered/image_rect" to="/object_segmentation_from_text/depth_masked"/>
+ <remap from="depth_registered/points" to="/object_segmentation_from_text/points"/>
+ <remap from="rgb/image_rect_color" to="/object_segmentation_from_text/RGB_masked"/>
+ <remap from="rgb/camera_info" to="/object_segmentation_from_text/camera_info"/>
+</node>
+</launch>
