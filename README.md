@@ -31,7 +31,7 @@ https://www.youtube.com/watch?v=kgQgaghf71o
   
   # startup caption buffering
   $rosrun object_segmentation_from_text caption_buffer_from_console.py
-  `
+ ```
 
 # todo
 - Wrap usage in a launch file
