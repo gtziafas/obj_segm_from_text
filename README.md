@@ -7,15 +7,34 @@ https://www.youtube.com/watch?v=kgQgaghf71o
 # usage
 - Be sure to edit paths inside files to your own static images, rosbags etc.
 - The model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network
-- Open 5 terminals:
+- Open 8 terminals: (steps 3-5 are equivalent, depending from where you get your visual data)
 ```
+  # startup master
   $roscore
-  $rosrun oject_segmentation_from_text image_buffer_from_path.py (for static image), or rosbag play for recorded data)
+  
+  # startup model_inference_pipeline for loading the neural net and utils
   $rosrun object_segmentation_from_text modeL_inference_pipeline.py
-  $rosrun object_segmentation_from_text caption_buffer_from_console.py
+  
+  # ONLY ONE of the following: define your visual input src (static images, rosbag in a loop, real-time data from
+  # depth sensors e.g. Kinect)
+  $rosrun oject_segmentation_from_text image_buffer_from_path.py file_path  
+  $rosbag play -l bag_file 
+  $roslaunch openni_launch openni_launch
+  
+  # setup visualization
   $rosrun rviz rviz 
-```
+  $rosrun tf static_transform_publisher 0 0 0 0 0 0 map camera_rgb_optical_frame 100
+  
+   # setup 3d extraction modules
+  $rosrun object_segmentation_from_text 3d_image_buffer.py 
+  $roslaunch object_segmentation_from_text 3d_extraction.py 
+  
+  # startup caption buffering
+  $rosrun object_segmentation_from_text caption_buffer_from_console.py
+  `
 
 # todo
-- Use depth_image_proc package to segment also PointCloud2 of the captioned object from RGBD data
+- Wrap usage in a launch file
+- Fix 3d_image_buffer node to correctly time-stamp buffed data
+- Re-implement model_inference_line as an action server
 - Implement a speech2text module for online speech captioning instead of console input
