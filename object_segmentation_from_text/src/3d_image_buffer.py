@@ -22,7 +22,7 @@ class _3DImageBuffer():
 		self.rgb_pub = rospy.Publisher('/object_segmentation_from_text/RGB_masked', Image, queue_size=10)
 		self.depth_pub = rospy.Publisher('/object_segmentation_from_text/depth_masked', Image, queue_size=10)
 		self.camera_pub = rospy.Publisher('/object_segmentation_from_text/camera_info', CameraInfo, queue_size=10)
-		self.rate = rospy.Rate(30) # @5 Hz
+		self.rate = rospy.Rate(3) # @3 Hz
 
 		self.depth_sub = rospy.Subscriber("/camera/depth_registered/hw_registered/image_rect", Image, self.got_depth)
 		self.rgb_sub = rospy.Subscriber("/object_segmentation_from_text/RGB_msked", Image, self.got_rgb)
