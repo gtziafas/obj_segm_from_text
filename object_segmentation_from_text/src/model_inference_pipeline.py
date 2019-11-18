@@ -30,8 +30,8 @@ import spacy
 nlp = spacy.load('en_core_web_md')
 
 # load ZSG network module and anchor utils
-from ZSGNetwork import get_default_net
-from anchors import (create_anchors, reg_params_to_bbox, x1y1x2y2_to_y1x1y2x2)
+from utils.ZSGNetwork import get_default_net
+from utils.anchors import (create_anchors, reg_params_to_bbox, x1y1x2y2_to_y1x1y2x2)
 
 # use CUDA tensors if available
 device='cpu'
