@@ -36,5 +36,5 @@ https://www.youtube.com/watch?v=kgQgaghf71o
 # todo
 - Wrap usage in a launch file
 - Fix 3d_image_buffer node to correctly time-stamp buffed data
-- Re-implement model_inference_line as an action server
+- Re-implement model_inference_pipeline as an action server instead of node for appripriately handling GPU memory
 - Implement a speech2text module for online speech captioning instead of console input
