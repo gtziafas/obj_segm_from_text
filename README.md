@@ -27,7 +27,7 @@ https://www.youtube.com/watch?v=kgQgaghf71o
   
    # setup 3d extraction modules
   $rosrun object_segmentation_from_text 3d_image_buffer.py 
-  $roslaunch object_segmentation_from_text 3d_extraction.py 
+  $roslaunch object_segmentation_from_text 3d_extraction.launch
   
   # startup caption buffering
   $rosrun object_segmentation_from_text caption_buffer_from_console.py
