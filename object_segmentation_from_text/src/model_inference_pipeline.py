@@ -9,7 +9,6 @@ from __future__ import print_function
 import roslib
 roslib.load_manifest('object_segmentation_from_text')
 import rospy
-import message_filters as mf 
 from std_msgs.msg import String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
@@ -25,14 +24,14 @@ from pathlib import Path
 from typing import Dict 
 from functools import partial 
 from yacs.config import CfgNode as CN
-from anchors import (create_anchors, reg_params_to_bbox, x1y1x2y2_to_y1x1y2x2)
 
 # import spacy module for GloVe pre-trained word embeddings
 import spacy 
 nlp = spacy.load('en_core_web_md')
 
-# load ZSG network module 
+# load ZSG network module and anchor utils
 from ZSGNetwork import get_default_net
+from anchors import (create_anchors, reg_params_to_bbox, x1y1x2y2_to_y1x1y2x2)
 
 # use CUDA tensors if available
 device='cpu'
@@ -46,7 +45,7 @@ cfg_path = '/home/ggtz/vis_gr_ws/src/object_segmentation_from_text/configs/cfg.j
 model_path = '/home/ggtz/vis_gr_ws/src/object_segmentation_from_text/checkpoints/zsgnet_flickr30k_best.pth'
 
 # collate function for pushing tensor objects into batches 
-def collater(batch):
+def collate_fn(batch):
     qlens = torch.Tensor([i['qlens'] for i in batch])
     max_qlen = int(qlens.max().item())
     out_dict = {}
@@ -93,19 +92,15 @@ class ModelInferencePipeline():
     self.load_network()
     
     # init subs/pubs and callback functions
-    self.rgb1_pub = rospy.Publisher('/object_segmentation_from_text/RGB_cropped', Image, queue_size=10)  # RGB image publisher
-    self.rgb2_pub = rospy.Publisher('/object_segmentation_from_text/RGB_with_box', Image, queue_size=10) # -""---""---""----
-    self.depth_pub = rospy.Publisher('/object_segmentation_from_text/depth_cropped', Image, queue_size=10) # Depth image publisher
-    self.rate = rospy.Rate(5) # @5 Hz
+    self.rgb1_pub = rospy.Publisher('/object_segmentation_from_text/RGB_with_box', Image, queue_size=10)
+    self.rgb2_pub = rospy.Publisher('/object_segmentation_from_text/RGB_msked', Image, queue_size=10) # -""---""---""----
+    self.rate = rospy.Rate(3) # @5 Hz
 
     self.caption = ' PD' # PAD value given temporarily
-    self.cached = self.caption # to dump previous captions
+    self.img, self.caption_embdds, self.caption_len = None, None, None # NULL init
     self.caption_sub = rospy.Subscriber("/caption_buffer_from_console/caption", String, self.got_caption)
-    self.rgb_sub = rospy.Subscriber("/image_buffer_from_path/RGB", Image, self.got_img)
-    #self.rgb_sub = mf.Subscriber("/camera/rgb/image_rect_color", Image)
-    #self.depth_sub = mf.Subscriber("/camera/depth_registered/hw_registered/image_rect", Image)
-    #self.ats = mf.ApproximateTimeSynchronizer([self.rgb_sub, self.depth_sub], queue_size=5, slop=.1)
-    #self.ats.registerCallback(self.got_imgs)
+    #self.rgb_sub = rospy.Subscriber("/image_buffer_from_path/RGB", Image, self.got_img)
+    self.rgb_sub = rospy.Subscriber("/camera/rgb/image_rect_color", Image, self.got_img)
 
   def load_network(self):
 
@@ -133,7 +128,7 @@ class ModelInferencePipeline():
       return
     try:
       checkpoint = torch.load(open(self.mfile, 'rb'))
-      rospy.loginfo('Loaded model from {} Correctly'.format(self.mfile))
+      rospy.loginfo('Succesfully loaded model from {}'.format(self.mfile))
     except OSError as e:
       rospy.loginfo('Some problem with model path: {}. Exception raised {}'.format(self.path, e))
       raise e
@@ -146,32 +141,33 @@ class ModelInferencePipeline():
     # save buffed string 
     self.caption = str(caption.data)
 
+    # release previous GPU memory
+    #del self.caption_embdds, self.caption_len
+
     # create word embeddings for input caption sequence
     self.caption_embdds, self.caption_len = self.create_caption_embeddings(self.caption)
 
   def got_img(self, img):
-    self.h, self.w, self.img_step = img.height, img.width, img.step
+
+    # init result sensor_msgs/Image msg 
+    self.imgmsg = Image()
+    self.imgmsg.header.stamp = img.header.stamp 
+    self.imgmsg.header.frame_id = img.header.frame_id 
+    self.imgmsg.step = img.step 
+    self.imgmsg.encoding = img.encoding 
+    self.imgmsg.is_bigendian = img.is_bigendian 
+    self.imgmsg.height, self.imgmsg.width = img.height, img.width
+
+
+    # load image 
+    self.h, self.w = img.height, img.width
     self.rgb = np.frombuffer(img.data, dtype=np.uint8).reshape(self.h, self.w, -1)
     img = cv2.resize(self.rgb, (self.resize_image, self.resize_image))
     self.img = cv2_to_tensor(img, np.float_)
 
     # predict box and publish processed data 
     self.inference()
-    self.cached = self.caption
     self.publish_processed_image()
-
-  def got_imgs(self, rgb, depth):
-    print('IN')
-    # convert RGB sensor_msgs.msgs/Image byte array to numpy array 
-    self.h, self.w = rgb.height, rgb.width
-    self.rgb = np.frombuffer(rgb.data, dtype=np.uint8).reshape(self.h, self.w, -1)
-
-    # resize to desired image size and convert to torch tensor
-    self.img = cv2.resize(self.rgb, (self.resize_image, self.resize_image))
-    self.img = cv2_to_tensor(self.img, np.float_)
-
-    # save buffed depth image 
-    self.depth = np.frombuffer(depth.data, dtype=np.uint8).reshape(self.h, self.w, -1)
 
   # convert given caption string of length qlen to torch tensor of shape [qlen X 300]
   def create_caption_embeddings(self, q):
@@ -198,8 +194,8 @@ class ModelInferencePipeline():
         'idxs'      :  torch.tensor(0.).to(self.device),
         'img_size'  :  torch.tensor([self.h, self.w]).to(self.device)
     }
-    self.inp = collater([self.inp])
-
+    self.inp = collate_fn([self.inp])
+    
     with torch.no_grad():
       # forward pass
       out = self.model(self.inp)
@@ -208,7 +204,8 @@ class ModelInferencePipeline():
       box_dict = self.get_bbox(out, self.inp['img_size'])
 
     self.bbox = box_dict['pred_box'].squeeze()
-    #rospy.loginfo('Infered bounding box={}'.format(self.bbox))
+    self.confidence = box_dict['pred_score'].squeeze()
+    #rospy.loginfo('Infered bounding box={} with confidence={}%'.format(self.bbox, self.confidence*100.))
 
   def get_bbox(self, out, img_size):
     att_box = out['att_out']
@@ -256,45 +253,32 @@ class ModelInferencePipeline():
     self.rgb = cv2.putText(self.rgb, self.caption, (self.bbox[0]+2, self.bbox[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0xFF), thickness=2)
 
     #construct sensor_msgs/Image object
-    img = Image()
-    img.header.stamp = rospy.Time()
-    img.header.frame_id = 'camera_rgb_optical_frame'
-    img.height, img.width = self.h, self.w 
-    img.encoding = 'bgr8'
-    img.is_bigendian = 0
-    img.step = self.img_step
-    img.data = self.rgb.tobytes()
-
+    self.imgmsg.data = self.rgb.tobytes()
+    
     # publish frame
-    log_str = 'publishing processed frames %s' % rospy.get_time()
-    rospy.loginfo(log_str)
-    self.rgb2_pub.publish(img)   
+    rospy.loginfo('publishing processed frame (with bbox) %s' % rospy.get_time())
+    self.rgb1_pub.publish(self.imgmsg)   
+
+    # hack to republish frame
+    msk = np.zeros( (self.rgb.shape[0], self.rgb.shape[1]))
+    msk = cv2.rectangle(msk, (self.bbox[0], self.bbox[1]), (self.bbox[2],self.bbox[3]), 0xFF, -1)
+    
+    rgb_msked = np.zeros_like(self.rgb)
+    rgb_msked[msk==0xFF, :] = self.rgb[msk==0xFF, :] 
+
+    # construct new imgmsg
+    msg = Image()
+    msg.header = self.imgmsg.header
+    msg.height, msg.width, msg.step = self.imgmsg.height, self.imgmsg.width, self.imgmsg.step
+    msg.encoding = self.imgmsg.encoding
+    msg.is_bigendian = self.imgmsg.is_bigendian
+    msg.data = rgb_msked.tobytes()
+    self.rgb2_pub.publish(msg)
+
     self.rate.sleep() 
 
-  def publish_processed_images(self):
-    # crop bbox data in both frames through masking
-    msk = np.zeros_like(self.depth)
-    msk = cv2.rectangle(msk, (self.bbox[0], self.bbox[1]), (self.bbox[2],self.bbox[3]), 0xFF, -1)
-    rgb_proc = np.zeros_like(self.rgb)
-    depth_proc = np.zeros_like(self.depth)
-    rgb_proc[msk==0xFF, :] = self.rgb[msk==0xFF, :]
-    depth_proc[msk==0xFF] = self.depth[msk==0xFF]
-
-    # also publish the original frame with the box drawn
-    rgb_with_box = cv2.rectangle(self.rgb, (self.bbox[0], self.bbox[1]), (self.bbox[2],self.bbox[3]), (0,0,0xFF), 2)
-
-    # convert numpy arrays back to byte arrays for publishing
-    rgb_proc = np.getbuffer(rgb_proc)
-    depth_proc = np.getbuffer(depth_proc)
-
-    # publish frames
-    while not rospy.is_shutdown():
-      log_str = 'publishing processed frames %s' % rospy.get_time()
-      rospy.loginfo(log_str)
-      self.rgb1_pub.publish(rgb_proc)
-      self.rgb2_pub.publish(rgb_with_box)
-      self.depth_pub.publish(depth_proc)
-      self.rate.sleep()
+    # release GPU memory for next data
+    del self.img
 
 def main(args):
   pp = ModelInferencePipeline()
