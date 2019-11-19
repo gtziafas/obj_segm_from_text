@@ -1,6 +1,5 @@
 """
 Model script for ZSG Network, adapted from: https://github.com/TheShadow29/zsgnet-pytorch
-Author: Arka Sadhu
 
 SSD-VGG implementation adapted from the repository: https://github.com/amdegroot/ssd.pytorch/blob/master/ssd.py
 
