@@ -1,12 +1,13 @@
 # object_segmentation_from_text
-Code for the final project of the RUG's course "Cognitive Robotics" (November 2019), based on: https://github.com/TheShadow29/zsgnet-pytorch
+Code for the final project of the RUG's course "Cognitive Robotics" (November 2019), based on: ["Zero-Shot Grounding of Objects from Natural Language Queries
+"](https://arxiv.org/abs/1908.07129)
 
 # demo
 https://www.youtube.com/watch?v=kgQgaghf71o
 
 # usage
 - Be sure to edit paths inside files to your own static images, rosbags etc.
-- The model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network, our module will take care on how to implement inference
+- The model weights are missing, too big of a file, follow instructions on the paper's [git page](https://github.com/TheShadow29/zsgnet-pytorch), our module will take care on how to implement inference
 - Open 8 terminals: (steps 3-5 are equivalent, depending from where you get your visual data)
 ```
   # startup master
