@@ -6,7 +6,7 @@ https://www.youtube.com/watch?v=kgQgaghf71o
 
 # usage
 - Be sure to edit paths inside files to your own static images, rosbags etc.
-- The model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network
+- The model weights are missing, too big of a file, follow instructions on the above git page to train the ZSG network, our module will take care on how to implement inference
 - Open 8 terminals: (steps 3-5 are equivalent, depending from where you get your visual data)
 ```
   # startup master
