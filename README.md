@@ -26,6 +26,7 @@ https://www.youtube.com/watch?v=kgQgaghf71o
   $rosrun rviz rviz 
   $rosrun tf static_transform_publisher 0 0 0 0 0 0 map camera_rgb_optical_frame 100
   
+   # run this ONLY if you have visual input from RGB-D data
    # setup 3d extraction modules
   $rosrun object_segmentation_from_text 3d_image_buffer.py 
   $roslaunch object_segmentation_from_text 3d_extraction.launch
